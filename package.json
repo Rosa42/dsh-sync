@@ -1,0 +1,21 @@
+{
+  "name": "@local/dsh-sync",
+  "version": "2.0.0",
+  "private": true,
+  "description": "DeepSeek Harness plugin: a Settings page that syncs the DSH home directory across machines with rclone bisync, with a configurable sync scope and guided cloud-remote setup.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "rclone", "bisync", "sync", "webdav"],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "README.md", "LICENSE"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
