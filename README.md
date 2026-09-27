@@ -128,9 +128,18 @@ All four are exact Fetch routes under `/api/`, so Connection applies its Host/Or
 
 ## Development
 
-There is no build step: the Host half is plain ESM and the Client half is a plain-JavaScript module-loader factory. Check syntax with `node --check index.js && node --check client.js`.
+There is no build step: the Host half is plain ESM and the Client half is a plain-JavaScript module-loader factory.
 
-The Host routes can be exercised without a running server by driving them through a stub context — see the `host-route-test.mjs` pattern in the deployment this plugin came from: build a fake `ctx` whose `connection.fetch.register` records routes, call `apply(ctx)`, then invoke each route's `fetch` with a real `Request`.
+```sh
+node --check index.js && node --check client.js   # syntax
+npm test                                          # both suites below
+```
+
+`test/host-routes.mjs` builds a stub `Context` whose `connection.fetch.register` records routes, calls `apply(ctx, { localRoot, workDir })` with both paths redirected into a temporary directory, then invokes every route with a real `Request` and asserts the results. It never touches a real DSH home.
+
+`test/dictionaries.mjs` reads `client.js` and checks that both dictionaries define the same keys, that every `t('...')` call resolves, and that the indirectly referenced `ITEM_TEXT` keys exist.
+
+Neither suite needs a running server or an installed rclone: the rclone-dependent assertions cover the guards that fire before any process is spawned.
 
 ## License
 

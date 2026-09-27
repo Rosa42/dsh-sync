@@ -5,6 +5,9 @@
   "description": "DeepSeek Harness plugin: a Settings page that syncs the DSH home directory across machines with rclone bisync, with a configurable sync scope and guided cloud-remote setup.",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "test": "node test/host-routes.mjs && node test/dictionaries.mjs"
+  },
   "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "rclone", "bisync", "sync", "webdav"],
   "exports": {
     ".": "./index.js",
