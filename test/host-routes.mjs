@@ -16,6 +16,10 @@ const sandbox = await mkdtemp(join(tmpdir(), 'dsh-sync-test-'))
 const localRoot = join(sandbox, 'dsh-home')
 const workDir = join(sandbox, 'work')
 
+// The plugin locates rclone outside PATH, so keep its invocations off whatever
+// remote list the machine running this suite happens to have.
+process.env.RCLONE_CONFIG = join(sandbox, 'rclone.conf')
+
 const routes = []
 const ctx = {
   effect: factory => factory(),
@@ -51,7 +55,10 @@ try {
   check('state answers 200', state.status === 200, String(state.status))
   check('state reports the seeded local root', state.value.localRoot === localRoot, state.value.localRoot)
   check('state reports the seeded working directory', state.value.workDir === workDir, state.value.workDir)
-  check('state ships the eight sync items', state.value.items.length === 8, String(state.value.items.length))
+  check('state reports the eight sync items', state.value.items.length === 8, String(state.value.items.length))
+  check('state reports which rclone executable was resolved',
+    typeof state.value.rclone.path === 'string' && state.value.rclone.path !== '',
+    String(state.value.rclone.path))
   check('secrets are off by default', state.value.settings.sync.credentials === false)
   check('generated rules exclude the credential files',
     (await readFile(state.value.filtersPath, 'utf8')).includes('- /.credentials.yaml'))

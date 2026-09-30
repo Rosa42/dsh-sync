@@ -46,6 +46,12 @@ plugin_manager install_bundle  target: <absolute path to this directory>
 
 Installing links the directory into the profile and enables the bundle. **Restart the `dsh web` server afterwards**: the Cordis loader caches the module path it resolved for an entry, so a replaced or relocated plugin keeps running the previous JavaScript module generation until the process restarts. Changing a directory or a row id does not bypass that cache.
 
+### rclone visibility on Windows
+
+The plugin runs `rclone` and reports it as missing when it cannot be found. On Windows, PATH alone is an unreliable answer: a process started before the winget install inherits an environment without winget's command-shim directory, and a new terminal launched from a long-running `explorer.exe` inherits that same stale environment. Restarting `dsh web` in the same terminal therefore does not help.
+
+The plugin resolves the executable once per process, trying PATH first and then `%LOCALAPPDATA%\Microsoft\WinGet\Links`. The status card shows the path it settled on, so a fallback is visible rather than silent. If rclone lives somewhere else entirely, put its directory on PATH for the process that launches `dsh web`.
+
 ## Configuration
 
 Settings live in `<workDir>/settings.json` and are written by the page. They are a plain JSON document:
@@ -160,10 +166,10 @@ npm test                                          # all four suites
 |---|---|---|
 | `test/host-routes.mjs` | Builds a stub `Context` whose `connection.fetch.register` records routes, calls `apply(ctx, { localRoot, workDir })` with both paths redirected into a temporary directory, then invokes every route with a real `Request`. It never touches a real DSH home. | nothing |
 | `test/dictionaries.mjs` | Both dictionaries define the same keys, every `t('...')` call resolves, the indirectly referenced `ITEM_TEXT` labels exist, and every step id and verdict the Host can emit has a label. | nothing |
-| `test/probe-round-trip.mjs` | Runs the self-test against an rclone-served WebDAV peer over loopback and asserts a healthy verdict. Sets `RCLONE_CONFIG` to a temporary file, so the user's own remotes are untouched. | rclone on PATH |
-| `test/probe-modtime-mismatch.mjs` | Runs the self-test against a minimal WebDAV server that deliberately reports the wrong modification time, and asserts the probe catches it and recommends `size`. | rclone on PATH |
+| `test/probe-round-trip.mjs` | Runs the self-test against an rclone-served WebDAV peer over loopback and asserts a healthy verdict. Sets `RCLONE_CONFIG` to a temporary file, so the user's own remotes are untouched. | rclone (found on PATH or in winget's shim directory) |
+| `test/probe-modtime-mismatch.mjs` | Runs the self-test against a minimal WebDAV server that deliberately reports the wrong modification time, and asserts the probe catches it and recommends `size`. | rclone (found on PATH or in winget's shim directory) |
 
-The two probe suites skip with a printed reason when rclone is absent, so `npm test` stays green on a machine that has not installed it yet.
+The two probe suites skip with a printed reason when rclone is absent, so `npm test` stays green on a machine that has not installed it yet. All four locate rclone the same way the plugin does — PATH first, then winget's command-shim directory — so they run on a machine whose PATH predates the rclone install.
 
 ## License
 

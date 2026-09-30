@@ -30,8 +30,14 @@ const REMOTE_PATH = '/api/dsh-sync.remote'
 const RUN_PATH = '/api/dsh-sync.run'
 const PROBE_PATH = '/api/dsh-sync.probe'
 
-/** Windows resolves the executable only with its extension under `execFile`. */
-const RCLONE = process.platform === 'win32' ? 'rclone.exe' : 'rclone'
+/**
+ * The rclone executable to invoke.
+ *
+ * Windows resolves it only with its extension under `execFile`. This is `let`
+ * rather than `const` because {@link resolveRclone} may replace it with a
+ * located path.
+ */
+let RCLONE = process.platform === 'win32' ? 'rclone.exe' : 'rclone'
 
 const PROBE_TIMEOUT_MS = 20_000
 const RUN_TIMEOUT_MS = 15 * 60 * 1000
@@ -143,6 +149,43 @@ function missingExecutable(result) {
   return !result.ok && /ENOENT/.test(result.message)
 }
 
+/** Candidate rclone executables, most specific first. */
+function rcloneCandidates() {
+  const base = process.platform === 'win32' ? 'rclone.exe' : 'rclone'
+  const candidates = [base]
+  const local = process.env.LOCALAPPDATA
+  if (process.platform === 'win32' && typeof local === 'string' && local !== '') {
+    candidates.push(join(local, 'Microsoft', 'WinGet', 'Links', base))
+  }
+  return candidates
+}
+
+/** Whether the executable has already been settled for this process. */
+let rcloneSettled = false
+
+/**
+ * Pick the rclone executable once per process.
+ *
+ * PATH alone is not enough on Windows: a process started before a winget install
+ * inherits an environment without winget's command-shim directory, and Windows
+ * hands new terminals the stale environment of a long-running explorer. The shim
+ * directory is therefore searched explicitly. When nothing resolves, the plain
+ * PATH name is kept so callers still report rclone as missing.
+ *
+ * @returns the executable to invoke.
+ */
+async function resolveRclone() {
+  if (rcloneSettled) return RCLONE
+  rcloneSettled = true
+  for (const candidate of rcloneCandidates()) {
+    if (!missingExecutable(await run(candidate, ['version'], { timeout: PROBE_TIMEOUT_MS }))) {
+      RCLONE = candidate
+      break
+    }
+  }
+  return RCLONE
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -250,14 +293,15 @@ async function syncFilters(settings) {
 // ---------------------------------------------------------------------------
 
 async function rcloneState() {
-  const probe = await run(RCLONE, ['version'], { timeout: PROBE_TIMEOUT_MS })
-  if (missingExecutable(probe)) return { installed: false, version: '', remotes: [] }
+  const binary = await resolveRclone()
+  const probe = await run(binary, ['version'], { timeout: PROBE_TIMEOUT_MS })
+  if (missingExecutable(probe)) return { installed: false, version: '', remotes: [], path: binary }
   const version = (probe.stdout.split('\n')[0] ?? '').trim()
-  const list = await run(RCLONE, ['listremotes'], { timeout: PROBE_TIMEOUT_MS })
+  const list = await run(binary, ['listremotes'], { timeout: PROBE_TIMEOUT_MS })
   const remotes = list.ok
     ? list.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
     : []
-  return { installed: probe.ok, version, remotes }
+  return { installed: probe.ok, version, remotes, path: binary }
 }
 
 async function lastRun() {
@@ -389,7 +433,7 @@ async function handleRemote(request) {
     return json({ ok: false, error: 'Both the account and the app password are required.' }, 400)
   }
 
-  const probe = await run(RCLONE, ['version'], { timeout: PROBE_TIMEOUT_MS })
+  const probe = await run(await resolveRclone(), ['version'], { timeout: PROBE_TIMEOUT_MS })
   if (missingExecutable(probe)) {
     return json({ ok: false, error: 'rclone is not installed.' }, 400)
   }

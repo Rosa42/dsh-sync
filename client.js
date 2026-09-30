@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
       'lead': '把本机的会话记录与配置同步到云端，并在多台机器之间保持一致。',
       'status.heading': '当前状态',
       'status.rclone': 'rclone',
+      'status.rclonePath': 'rclone 路径',
       'status.missing': '未安装',
       'status.install': '在终端运行 winget install Rclone.Rclone 即可安装。',
       'status.local': '本机状态目录',
@@ -133,6 +134,7 @@ window.__ModuleLoader__.load({
       'lead': 'Sync this machine\'s sessions and configuration to the cloud and keep several machines consistent.',
       'status.heading': 'Current state',
       'status.rclone': 'rclone',
+      'status.rclonePath': 'rclone path',
       'status.missing': 'Not installed',
       'status.install': 'Install it with winget install Rclone.Rclone in a terminal.',
       'status.local': 'Local state directory',
@@ -497,6 +499,9 @@ window.__ModuleLoader__.load({
             state === null ? t('status.loading')
               : state.rclone.installed ? state.rclone.version
                 : t('status.missing') + ' — ' + t('status.install'), 'rclone'),
+          state?.rclone.installed === true && typeof state.rclone.path === 'string'
+            ? Row(t('status.rclonePath'), state.rclone.path, 'rclone-path')
+            : null,
           Row(t('status.local'), state?.localRoot ?? '—', 'local'),
           Row(t('status.work'), state?.workDir ?? '—', 'work'),
           Row(t('status.filters'), state?.filtersPath ?? '—', 'filters'),

@@ -15,9 +15,15 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { findRclone } from './rclone.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const RCLONE = process.platform === 'win32' ? 'rclone.exe' : 'rclone'
+
+const RCLONE = await findRclone()
+if (RCLONE === null) {
+  console.log('skip  rclone was not found; the probe round-trip needs a real remote')
+  process.exit(0)
+}
 
 function exec(args) {
   return new Promise(resolve => {
@@ -30,12 +36,6 @@ function exec(args) {
       })
     })
   })
-}
-
-const version = await exec(['version'])
-if (!version.ok && /ENOENT/.test(version.message)) {
-  console.log('skip  rclone is not on PATH; the probe round-trip needs a real remote')
-  process.exit(0)
 }
 
 let failures = 0

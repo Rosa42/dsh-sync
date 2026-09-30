@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-sync",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "DeepSeek Harness plugin: a Settings page that syncs the DSH home directory across machines with rclone bisync, with a configurable sync scope and guided cloud-remote setup.",
   "license": "MIT",
