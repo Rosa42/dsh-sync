@@ -43,6 +43,21 @@ for (const match of text.matchAll(/\['(item\.[^']+)', '(item\.[^']+)'\]/g)) {
 }
 const indirectMissing = [...indirect].filter(key => !zh.has(key))
 
+// The self-test builds its labels as t('probe.step.' + id) and
+// t('probe.verdict.' + verdict), so a static scan cannot follow them. Those keys
+// are instead validated against the values the Host half actually emits, which
+// is the mistake that matters: an unlabelled verdict would render as a raw key.
+const hostSource = await readFile(join(here, '..', 'index.js'), 'utf8')
+const stepIds = [...hostSource.matchAll(/\bid: '([a-z][a-z-]*)',\n\s+ok:/g)].map(m => m[1])
+// A verdict is often a ternary (`modtimeOk ? 'ok' : 'modtime-mismatch'`), so every
+// quoted literal on a `verdict:` line counts, not just a bare assignment.
+const verdicts = [...hostSource.matchAll(/\bverdict:[^\n]*/g)]
+  .flatMap(line => [...line[0].matchAll(/'([a-z][a-z-]*)'/g)].map(m => m[1]))
+const dynamic = new Set([
+  ...stepIds.map(id => `probe.step.${id}`),
+  ...verdicts.map(verdict => `probe.verdict.${verdict}`),
+])
+
 let failures = 0
 function check(label, condition, detail) {
   if (condition) {
@@ -60,7 +75,13 @@ check('every directly referenced key exists', missing.length === 0, missing.join
 check(`every one of the ${indirect.size} indirectly referenced keys exists`,
   indirectMissing.length === 0, indirectMissing.join(', '))
 
-const reachable = new Set([...used, ...indirect, 'nav'])
+check(`the Host emits at least one step id (${stepIds.join(', ') || 'none'})`, stepIds.length > 0)
+check(`the Host emits at least one verdict (${verdicts.join(', ') || 'none'})`, verdicts.length > 0)
+const unlabelled = [...dynamic].filter(key => !zh.has(key))
+check('every step id and verdict the Host emits has a label',
+  unlabelled.length === 0, unlabelled.join(', '))
+
+const reachable = new Set([...used, ...indirect, 'nav', ...dynamic])
 const unreachable = [...zh].filter(key => !reachable.has(key))
 check('no key is unreachable', unreachable.length === 0, unreachable.join(', '))
 

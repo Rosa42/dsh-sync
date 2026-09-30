@@ -105,6 +105,26 @@ window.__ModuleLoader__.load({
       'item.tag.derived': '派生',
       'webdav.vendor': '服务商类型',
       'webdav.vendor.hint': '只有 Nextcloud / ownCloud 系支持修改时间；纯 WebDAV 服务器下建议把比较方式改成 size。',
+      'probe.heading': '连接自检',
+      'probe.lead': '播种之前先验证这条链路：能否连通、能否写入、云端是否保留修改时间。自检会写入一个临时文件并立即删除。',
+      'probe.run': '运行自检',
+      'probe.running': '正在自检…',
+      'probe.never': '尚未自检。建议在首次播种前先跑一次。',
+      'probe.step.reach': '可达性',
+      'probe.step.write': '写入',
+      'probe.step.readback': '内容校验',
+      'probe.step.modtime': '时间戳保真',
+      'probe.verdict': '结论',
+      'probe.verdict.ok': '链路正常，可以播种',
+      'probe.verdict.modtime-mismatch': '云端改写了修改时间',
+      'probe.verdict.unreachable': '无法连接到云端',
+      'probe.verdict.read-only': '云端拒绝写入',
+      'probe.verdict.partial': '自检未完成',
+      'probe.compare': '建议比较方式',
+      'probe.apply': '采用建议',
+      'probe.hashes': '云端哈希',
+      'probe.hashes.none': '无——无法使用校验和比较',
+      'probe.modtimeWarning': '云端把修改时间改写成了上传时刻，双向同步会每轮都误判成「两边都有改动」，可能反复重传甚至产生大量副本。建议把「变更比较方式」改成 size；代价是同尺寸的内容改动无法被发现。',
     };
 
     const en = {
@@ -185,6 +205,26 @@ window.__ModuleLoader__.load({
       'item.tag.derived': 'derived',
       'webdav.vendor': 'Server type',
       'webdav.vendor.hint': 'Only Nextcloud and ownCloud report modification times; on a plain WebDAV server switch the comparison to size.',
+      'probe.heading': 'Connection self-test',
+      'probe.lead': 'Before seeding, verify the link: reachable, writable, and keeping modification times. The test writes one temporary file and removes it immediately.',
+      'probe.run': 'Run self-test',
+      'probe.running': 'Testing…',
+      'probe.never': 'Not tested yet. Run this before the first seed.',
+      'probe.step.reach': 'Reachability',
+      'probe.step.write': 'Writability',
+      'probe.step.readback': 'Content check',
+      'probe.step.modtime': 'Modification time',
+      'probe.verdict': 'Verdict',
+      'probe.verdict.ok': 'Healthy; safe to seed',
+      'probe.verdict.modtime-mismatch': 'The remote rewrites modification times',
+      'probe.verdict.unreachable': 'The remote cannot be reached',
+      'probe.verdict.read-only': 'The remote refused the upload',
+      'probe.verdict.partial': 'The self-test did not complete',
+      'probe.compare': 'Recommended comparison',
+      'probe.apply': 'Apply recommendation',
+      'probe.hashes': 'Remote hashes',
+      'probe.hashes.none': 'none — checksum comparison is unavailable',
+      'probe.modtimeWarning': 'The remote replaced the modification time with the upload time. A two-way sync would read both sides as changed on every run, retransferring files and leaving conflict copies. Switch Change comparison to size; the cost is that a same-size edit becomes undetectable.',
     };
 
     const S = {
@@ -253,12 +293,23 @@ window.__ModuleLoader__.load({
       conflictList: { margin: 0, padding: '0 0 0 18px', display: 'flex', flexDirection: 'column', gap: '4px' },
       conflictItem: { wordBreak: 'break-all', color: 'var(--dsw-alias-label-secondary)' },
       grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' },
+      stepRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '16px' },
+      stepLabel: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' },
+      stepDetail: { textAlign: 'right', lineHeight: 1.5, wordBreak: 'break-word' },
+      probeResult: { display: 'flex', flexDirection: 'column', gap: '6px' },
     };
 
     function Row(label, value, key) {
       return h('div', { style: S.row, key },
         h('span', { style: S.rowLabel }, label),
         h('span', { style: S.rowValue }, value));
+    }
+
+    /** One self-test step, coloured by whether it passed. */
+    function StepRow(label, detail, ok, key) {
+      return h('div', { style: S.stepRow, key },
+        h('span', { style: S.stepLabel }, label),
+        h('span', { style: { ...S.stepDetail, ...(ok ? S.okText : S.errorText) } }, detail));
     }
 
     function Note(note, t, onRetry) {
@@ -284,6 +335,8 @@ window.__ModuleLoader__.load({
       const [saveNote, setSaveNote] = useState(null);
       const [remoteNote, setRemoteNote] = useState(null);
       const [creating, setCreating] = useState(false);
+      const [probe, setProbe] = useState(null);
+      const [probing, setProbing] = useState(false);
       const [webdav, setWebdav] = useState({
         preset: 'nutstore',
         name: 'nutstore',
@@ -318,6 +371,38 @@ window.__ModuleLoader__.load({
         setDirty(true);
         setSaveNote(null);
       }, []);
+
+      /**
+       * Verify the target before anything is seeded. The result is advisory: a
+       * modification-time mismatch reports the comparison mode that follows from
+       * it, and applying that change stays an explicit click.
+       */
+      const runProbe = useCallback(async () => {
+        setProbing(true);
+        setProbe(null);
+        try {
+          const response = await fetch('api/dsh-sync.probe', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ target: remote + subpath }),
+          });
+          const result = await response.json();
+          if (response.ok) {
+            setError(null);
+            setProbe(result);
+          } else {
+            setError(result.error ?? 'HTTP ' + response.status);
+          }
+        } catch (cause) {
+          setError(String(cause?.message ?? cause));
+        } finally {
+          setProbing(false);
+        }
+      }, [remote, subpath]);
+
+      // A result describes the target it ran against, so changing the target
+      // retires it rather than leaving a stale verdict on screen.
+      useEffect(() => { setProbe(null); }, [remote, subpath]);
 
       const save = useCallback(async () => {
         setBusy(true);
@@ -437,6 +522,48 @@ window.__ModuleLoader__.load({
                   style: S.input, value: subpath, disabled: busy, spellCheck: false,
                   onChange: event => setSubpath(event.target.value),
                 })))),
+
+        h('section', { style: S.card },
+          h('h3', { style: S.heading }, t('probe.heading')),
+          h('p', { style: S.hint }, t('probe.lead')),
+          h('div', { style: S.controls },
+            h('button', {
+              style: probing || !ready ? { ...S.button, ...S.buttonDisabled } : S.button,
+              disabled: probing || !ready,
+              onClick: () => { void runProbe(); },
+            }, probing ? t('probe.running') : t('probe.run'))),
+          probe === null
+            ? h('p', { style: S.hint }, t('probe.never'))
+            : h('div', { style: S.probeResult },
+              probe.steps.map(step => StepRow(
+                t('probe.step.' + step.id),
+                (step.ok ? '✓ ' : '✗ ') + step.detail,
+                step.ok,
+                step.id)),
+              h('div', { style: S.stepRow },
+                h('span', { style: S.stepLabel }, t('probe.verdict')),
+                h('span', {
+                  style: {
+                    ...S.stepDetail,
+                    ...(probe.verdict === 'ok' ? S.okText
+                      : probe.verdict === 'modtime-mismatch' ? S.warnText : S.errorText),
+                  },
+                }, t('probe.verdict.' + probe.verdict))),
+              Row(t('probe.compare'), probe.recommendedCompare ?? '—', 'probe-compare'),
+              Row(t('probe.hashes'),
+                probe.hashes.length > 0 ? probe.hashes.join(', ') : t('probe.hashes.none'),
+                'probe-hashes'),
+              probe.verdict === 'modtime-mismatch'
+                ? h('p', { style: { ...S.hint, ...S.warnText } }, t('probe.modtimeWarning'))
+                : null,
+              probe.verdict === 'modtime-mismatch' && settings !== null
+                && settings.compare !== probe.recommendedCompare
+                ? h('div', { style: S.controls },
+                  h('button', {
+                    style: S.button,
+                    onClick: () => patchDraft({ compare: probe.recommendedCompare }),
+                  }, t('probe.apply')))
+                : null)),
 
         settings !== null && h('section', { style: S.card },
           h('h3', { style: S.heading }, t('scope.heading')),

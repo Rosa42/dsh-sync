@@ -43,7 +43,7 @@ async function call(path, body) {
 }
 
 try {
-  check('registers four routes', routes.length === 4, routes.map(r => r.path).join(', '))
+  check('registers five routes', routes.length === 5, routes.map(r => r.path).join(', '))
   check('every route is an /api exact route',
     routes.every(r => r.path.startsWith('/api/')), routes.map(r => r.path).join(', '))
 
@@ -88,6 +88,24 @@ try {
   for (const [body, label] of remoteGuards) {
     const result = await call('/api/dsh-sync.remote', body)
     check(`remote route refuses a bad ${label}`, result.status === 400, String(result.status))
+  }
+
+  const probeGuards = [
+    [{ target: 'bad target with spaces' }, 'target'],
+    [{ target: 'nosuchremote:dsh' }, 'unconfigured remote'],
+  ]
+  for (const [body, label] of probeGuards) {
+    const result = await call('/api/dsh-sync.probe', body)
+    check(`probe route refuses a bad ${label}`, result.status === 400, String(result.status))
+  }
+
+  const probeMalformed = await call('/api/dsh-sync.probe', undefined)
+  check('probe route rejects a malformed body', probeMalformed.status === 400, String(probeMalformed.status))
+
+  // The probe's round-trip needs a real rclone and a reachable remote, so it is
+  // covered by test/probe-round-trip.mjs rather than here.
+  if (state.value.rclone.installed !== true) {
+    console.log('note  probe round-trip is not covered here (rclone is absent); run test/probe-round-trip.mjs')
   }
 
   const runGuards = [

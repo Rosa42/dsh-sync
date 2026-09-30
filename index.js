@@ -17,8 +17,8 @@
  */
 
 import { execFile } from 'node:child_process'
-import { mkdir, readFile, writeFile, readdir, stat, appendFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export const name = 'dsh-sync'
@@ -28,6 +28,7 @@ const STATE_PATH = '/api/dsh-sync.state'
 const SETTINGS_PATH = '/api/dsh-sync.settings'
 const REMOTE_PATH = '/api/dsh-sync.remote'
 const RUN_PATH = '/api/dsh-sync.run'
+const PROBE_PATH = '/api/dsh-sync.probe'
 
 /** Windows resolves the executable only with its extension under `execFile`. */
 const RCLONE = process.platform === 'win32' ? 'rclone.exe' : 'rclone'
@@ -36,6 +37,19 @@ const PROBE_TIMEOUT_MS = 20_000
 const RUN_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const SETTINGS_VERSION = 1
+
+/** A probe round-trip talks to a remote twice; give it more room than a local check. */
+const PROBE_RUN_TIMEOUT_MS = 120_000
+
+/**
+ * The modification time the probe stampes on its file. It is deliberately in the
+ * past: a remote that rewrites mtimes to upload time returns "now", which is
+ * distinguishable from the sent value by far more than the tolerance.
+ */
+const PROBE_MTIME = new Date('2020-01-02T03:04:05.000Z')
+
+/** Seconds of drift still treated as a preserved modification time. */
+const PROBE_MTIME_TOLERANCE_SECONDS = 3
 
 /**
  * Every selectable slice of the DSH home directory.
@@ -478,7 +492,141 @@ async function handleRun(request) {
 }
 
 /**
- * Register the state, settings, remote, and run routes.
+ * Verify a remote is reachable, writable, and preserves modification times.
+ *
+ * bisync compares `size,modtime` between runs, so a remote that rewrites an
+ * uploaded file's modification time makes every run look like a change on both
+ * sides: the sync appears to work while repeatedly copying the same files. That
+ * failure is silent, so it is measured here before anything is seeded.
+ *
+ * The probe goes through the configured rclone remote rather than speaking
+ * WebDAV itself, which keeps the credential inside rclone's config. One
+ * temporary file is uploaded, read back, and removed; the report states what the
+ * remote actually did, plus the comparison mode that follows from it.
+ *
+ * @param target - `<remote>:<subpath>` peer to test.
+ * @returns the per-step results, a verdict, the recommended comparison mode, and
+ * the hash types the remote reports.
+ */
+async function probeRemote(target) {
+  const steps = []
+  const remoteRoot = `${target.slice(0, target.indexOf(':'))}:`
+
+  const reach = await run(RCLONE, ['lsd', remoteRoot], { timeout: PROBE_RUN_TIMEOUT_MS })
+  steps.push({
+    id: 'reach',
+    ok: reach.ok,
+    detail: reach.ok
+      ? 'The remote answered an authenticated listing.'
+      : (reach.stderr.trim() || reach.message),
+  })
+  if (!reach.ok) return { steps, verdict: 'unreachable', recommendedCompare: null, hashes: [] }
+
+  const sandbox = await mkdtemp(join(tmpdir(), 'dsh-sync-probe-'))
+  const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  const probeName = `.dsh-sync-probe-${stamp}.txt`
+  const remoteFile = `${target.replace(/\/+$/, '')}/${probeName}`
+  const localFile = join(sandbox, probeName)
+  const body = `dsh-sync probe ${stamp}\n`
+
+  try {
+    await writeFile(localFile, body, 'utf8')
+    await utimes(localFile, PROBE_MTIME, PROBE_MTIME)
+
+    const put = await run(RCLONE, ['copyto', localFile, remoteFile], { timeout: PROBE_RUN_TIMEOUT_MS })
+    steps.push({
+      id: 'write',
+      ok: put.ok,
+      detail: put.ok
+        ? 'A probe file was uploaded.'
+        : (put.stderr.trim() || put.message),
+    })
+    if (!put.ok) return { steps, verdict: 'read-only', recommendedCompare: null, hashes: [] }
+
+    const info = await run(RCLONE, ['lsjson', remoteFile, '--stat'], { timeout: PROBE_RUN_TIMEOUT_MS })
+    if (!info.ok) {
+      steps.push({ id: 'readback', ok: false, detail: info.stderr.trim() || info.message })
+      return { steps, verdict: 'partial', recommendedCompare: null, hashes: [] }
+    }
+
+    let meta = null
+    try {
+      meta = JSON.parse(info.stdout)
+    } catch {
+      // A non-JSON listing is reported through the readback step below.
+      meta = null
+    }
+
+    const expectedBytes = Buffer.byteLength(body)
+    const sizeOk = meta !== null && meta.Size === expectedBytes
+    steps.push({
+      id: 'readback',
+      ok: sizeOk,
+      detail: sizeOk
+        ? 'The uploaded file read back at the expected size.'
+        : `Expected ${expectedBytes} bytes; the remote reported ${meta?.Size ?? 'nothing'}.`,
+    })
+
+    const actualMtime = meta !== null && typeof meta.ModTime === 'string' ? new Date(meta.ModTime) : null
+    const valid = actualMtime !== null && !Number.isNaN(actualMtime.getTime())
+    const deltaSeconds = valid ? Math.round((actualMtime.getTime() - PROBE_MTIME.getTime()) / 1000) : null
+    const modtimeOk = deltaSeconds !== null && Math.abs(deltaSeconds) <= PROBE_MTIME_TOLERANCE_SECONDS
+    steps.push({
+      id: 'modtime',
+      ok: modtimeOk,
+      expected: PROBE_MTIME.toISOString(),
+      actual: valid ? actualMtime.toISOString() : null,
+      deltaSeconds,
+      detail: modtimeOk
+        ? `The remote kept the modification time (off by ${deltaSeconds}s).`
+        : valid
+          ? `Sent ${PROBE_MTIME.toISOString()}; the remote reports ${actualMtime.toISOString()} — off by ${deltaSeconds}s.`
+          : 'The remote reported no modification time.',
+    })
+
+    const hashes = meta !== null && meta.Hashes !== null && typeof meta.Hashes === 'object'
+      ? Object.keys(meta.Hashes)
+      : []
+
+    return {
+      steps,
+      verdict: modtimeOk ? 'ok' : 'modtime-mismatch',
+      recommendedCompare: modtimeOk ? 'size,modtime' : 'size',
+      hashes,
+    }
+  } finally {
+    // Never leave the probe file behind: the next bisync would otherwise copy it.
+    await run(RCLONE, ['deletefile', remoteFile], { timeout: PROBE_RUN_TIMEOUT_MS })
+    await rm(sandbox, { recursive: true, force: true })
+  }
+}
+
+async function handleProbe(request) {
+  const body = await readJsonBody(request)
+  if (body.error !== undefined) return json({ ok: false, error: body.error }, 400)
+
+  const source = body.value !== null && typeof body.value === 'object' ? body.value : {}
+  const settings = await readSettings()
+  const target = (typeof source.target === 'string' && source.target.trim() !== ''
+    ? source.target
+    : settings.target).trim()
+
+  if (!TARGET_PATTERN.test(target)) {
+    return json({ ok: false, error: 'Choose a remote and a subpath first, for example nutstore:dsh.' }, 400)
+  }
+
+  const remoteName = `${target.slice(0, target.indexOf(':'))}:`
+  const { installed, remotes } = await rcloneState()
+  if (!installed) return json({ ok: false, error: 'rclone is not installed.' }, 400)
+  if (!remotes.includes(remoteName)) {
+    return json({ ok: false, error: `rclone has no configured remote named ${remoteName}` }, 400)
+  }
+
+  return json({ ok: true, target, ...await probeRemote(target) })
+}
+
+/**
+ * Register the state, settings, remote, probe, and run routes.
  * @param ctx - Host context carrying the Connection service.
  * @param config - the loader row's raw config; only path seeds are read.
  */
@@ -496,6 +644,7 @@ export function apply(ctx, config = {}) {
     [STATE_PATH, ['GET'], async () => json(await readState())],
     [SETTINGS_PATH, ['POST'], handleSettings],
     [REMOTE_PATH, ['POST'], handleRemote],
+    [PROBE_PATH, ['POST'], handleProbe],
     [RUN_PATH, ['POST'], handleRun],
   ]
   for (const [path, methods, fetch] of routes) {

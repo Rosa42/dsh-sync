@@ -10,11 +10,31 @@ It wraps [rclone bisync](https://rclone.org/bisync/) so that none of the followi
 |---|---|
 | Current state | Whether rclone is installed, the resolved local and working directories, the generated rules file, the last run, and how many conflict copies exist |
 | Sync target | Cloud remote picked from `rclone listremotes`, plus a subpath, composed into `remote:subpath` |
+| Connection self-test | Reachability, writability, and modification-time fidelity of the target, before anything is seeded |
 | Sync scope | Per-slice toggles for what travels between machines, extra exclusion rules, comparison mode, conflict handling, deletion ceiling |
 | Configure cloud storage | Creates a WebDAV remote non-interactively, with a Nutstore (坚果云) preset |
 | Actions | Preview changes (`--dry-run`), sync now, first-time seed (`--resync`) |
 | Run output | The full rclone output, also appended to `logs/ui-<date>.log` |
 | Conflict copies | Every `*.conflictN` file left behind, so it can be merged by hand |
+
+## The connection self-test
+
+Run this before the first seed, and after changing remotes. It uploads one temporary file through the configured remote, reads its metadata back, and removes it — so the credential never leaves rclone's own configuration.
+
+| Step | What it proves | What a failure means |
+|---|---|---|
+| Reachability | The remote answers an authenticated listing | Wrong URL, wrong account, no network, or a bridge process that is not running |
+| Writability | A file can be uploaded | The account is read-only, or the server gates writes behind a permission it lacks |
+| Content check | The upload read back at the expected size | The transfer path corrupts data |
+| Modification time | The remote returned the time the file was sent with | **A two-way sync will misread every run** |
+
+The last step is the one that cannot be inferred from any documentation. `bisync` compares `size,modtime` against the previous run's listing, so a remote that replaces the modification time with the upload time makes both sides look changed on every pass: files are retransferred, and conflict copies accumulate. The probe dates its file to a fixed past instant, which is far enough from "now" to be unambiguous.
+
+When the remote rewrites modification times the verdict says so, recommends `size`, and offers to apply it. Take that recommendation deliberately rather than silently: `size` alone cannot detect an edit that leaves the file the same length.
+
+```sh
+npm test   # includes both probe suites; they skip when rclone is not on PATH
+```
 
 ## Install
 
@@ -115,16 +135,17 @@ Preview every seed with **Preview changes** first.
 
 ## Routes
 
-All four are exact Fetch routes under `/api/`, so Connection applies its Host/Origin checks and browser authentication. The browser addresses them document-relative, without the leading slash.
+All five are exact Fetch routes under `/api/`, so Connection applies its Host/Origin checks and browser authentication. The browser addresses them document-relative, without the leading slash.
 
 | Route | Method | Body | Returns |
 |---|---|---|---|
 | `/api/dsh-sync.state` | GET | — | Settings, sync-scope catalogue, rclone state, last run, conflicts |
 | `/api/dsh-sync.settings` | POST | Partial settings | `{ ok, settings }` |
 | `/api/dsh-sync.remote` | POST | `{ name, url, user, pass, vendor }` | `{ ok, remote, output }` |
+| `/api/dsh-sync.probe` | POST | `{ target }` | `{ ok, target, steps, verdict, recommendedCompare, hashes }` |
 | `/api/dsh-sync.run` | POST | `{ action, target, resyncMode }` | `{ ok, exitCode, output }` |
 
-`action` is `preview`, `sync`, or `seed`.
+`action` is `preview`, `sync`, or `seed`. A probe `verdict` is one of `ok`, `modtime-mismatch`, `unreachable`, `read-only`, or `partial`.
 
 ## Development
 
@@ -132,14 +153,17 @@ There is no build step: the Host half is plain ESM and the Client half is a plai
 
 ```sh
 node --check index.js && node --check client.js   # syntax
-npm test                                          # both suites below
+npm test                                          # all four suites
 ```
 
-`test/host-routes.mjs` builds a stub `Context` whose `connection.fetch.register` records routes, calls `apply(ctx, { localRoot, workDir })` with both paths redirected into a temporary directory, then invokes every route with a real `Request` and asserts the results. It never touches a real DSH home.
+| Suite | Covers | Needs |
+|---|---|---|
+| `test/host-routes.mjs` | Builds a stub `Context` whose `connection.fetch.register` records routes, calls `apply(ctx, { localRoot, workDir })` with both paths redirected into a temporary directory, then invokes every route with a real `Request`. It never touches a real DSH home. | nothing |
+| `test/dictionaries.mjs` | Both dictionaries define the same keys, every `t('...')` call resolves, the indirectly referenced `ITEM_TEXT` labels exist, and every step id and verdict the Host can emit has a label. | nothing |
+| `test/probe-round-trip.mjs` | Runs the self-test against an rclone-served WebDAV peer over loopback and asserts a healthy verdict. Sets `RCLONE_CONFIG` to a temporary file, so the user's own remotes are untouched. | rclone on PATH |
+| `test/probe-modtime-mismatch.mjs` | Runs the self-test against a minimal WebDAV server that deliberately reports the wrong modification time, and asserts the probe catches it and recommends `size`. | rclone on PATH |
 
-`test/dictionaries.mjs` reads `client.js` and checks that both dictionaries define the same keys, that every `t('...')` call resolves, and that the indirectly referenced `ITEM_TEXT` keys exist.
-
-Neither suite needs a running server or an installed rclone: the rclone-dependent assertions cover the guards that fire before any process is spawned.
+The two probe suites skip with a printed reason when rclone is absent, so `npm test` stays green on a machine that has not installed it yet.
 
 ## License
 
