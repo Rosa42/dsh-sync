@@ -11,9 +11,12 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const { useCallback, useEffect, useState } = React;
+    const { useCallback, useEffect, useRef, useState } = React;
 
     const NS = 'dsh-sync';
+
+    /** Mirrors the Host's local-target detection: drive, UNC, or POSIX absolute. */
+    const LOCAL_PATH_PATTERN = /^([A-Za-z]:[\\/]|\\\\|\/)/;
 
     /** Item keys are stable identifiers from the Host; labels are localized here. */
     const ITEM_TEXT = {
@@ -47,6 +50,13 @@ window.__ModuleLoader__.load({
       'target.remote': '云盘',
       'target.subpath': '云端目录',
       'target.none': '还没有配置任何 remote，先用下面的「配置云盘」建一个。',
+      'target.kind': '目标类型',
+      'target.kind.remote': '云盘',
+      'target.kind.local': '本地文件夹',
+      'target.local': '文件夹路径',
+      'target.local.hint': '指向云盘客户端已经在同步的文件夹，由客户端负责云端传输——不需要桥接，也不依赖逆向接口。',
+      'target.save': '保存目标',
+      'target.saved': '目标已保存',
       'scope.heading': '同步内容',
       'scope.lead': '选择要把哪些内容带到其它机器。关掉的项会写进排除规则，云端与本机都不会同步它。',
       'scope.save': '保存',
@@ -148,6 +158,13 @@ window.__ModuleLoader__.load({
       'target.remote': 'Cloud remote',
       'target.subpath': 'Cloud directory',
       'target.none': 'No remote configured yet. Create one under Configure cloud storage below.',
+      'target.kind': 'Target type',
+      'target.kind.remote': 'Cloud remote',
+      'target.kind.local': 'Local folder',
+      'target.local': 'Folder path',
+      'target.local.hint': 'Point at a folder your cloud client already syncs; the client handles the cloud transport, so no bridge and no reverse-engineered API is involved.',
+      'target.save': 'Save target',
+      'target.saved': 'Target saved',
       'scope.heading': 'Sync scope',
       'scope.lead': 'Choose what travels to your other machines. A disabled slice is written into the exclusion rules and is never synced, on either side.',
       'scope.save': 'Save',
@@ -331,6 +348,15 @@ window.__ModuleLoader__.load({
       const [output, setOutput] = useState('');
       const [remote, setRemote] = useState('');
       const [subpath, setSubpath] = useState('dsh');
+      const [targetKind, setTargetKind] = useState('remote');
+      const [localPath, setLocalPath] = useState('');
+      const [targetNote, setTargetNote] = useState(null);
+      // The target controls are seeded from stored settings once, so a reload
+      // never overwrites what the user is currently typing.
+      const targetSeeded = useRef(false);
+
+      /** The target the next action uses: a remote pair or an absolute folder. */
+      const effectiveTarget = targetKind === 'local' ? localPath.trim() : remote + subpath;
       const [resyncMode, setResyncMode] = useState('path1');
       const [draft, setDraft] = useState(null);
       const [dirty, setDirty] = useState(false);
@@ -358,9 +384,21 @@ window.__ModuleLoader__.load({
           const next = await response.json();
           setState(next);
           setError(null);
-          setRemote(current => current !== '' ? current : (next.rclone.remotes[0] ?? ''));
-          setSubpath(current => current !== 'dsh' ? current : (next.settings.target.split(':')[1] || current));
           setDraft(current => current ?? next.settings);
+          if (!targetSeeded.current) {
+            targetSeeded.current = true;
+            const configured = next.settings.target;
+            if (LOCAL_PATH_PATTERN.test(configured)) {
+              setTargetKind('local');
+              setLocalPath(configured);
+            } else if (configured !== '') {
+              const colon = configured.indexOf(':');
+              setRemote(configured.slice(0, colon + 1));
+              setSubpath(configured.slice(colon + 1));
+            } else {
+              setRemote(next.rclone.remotes[0] ?? '');
+            }
+          }
         } catch (cause) {
           setError(String(cause?.message ?? cause));
         }
@@ -386,7 +424,7 @@ window.__ModuleLoader__.load({
           const response = await fetch('api/dsh-sync.probe', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ target: remote + subpath }),
+            body: JSON.stringify({ target: effectiveTarget }),
           });
           const result = await response.json();
           if (response.ok) {
@@ -400,11 +438,36 @@ window.__ModuleLoader__.load({
         } finally {
           setProbing(false);
         }
-      }, [remote, subpath]);
+      }, [effectiveTarget]);
 
       // A result describes the target it ran against, so changing the target
       // retires it rather than leaving a stale verdict on screen.
-      useEffect(() => { setProbe(null); }, [remote, subpath]);
+      useEffect(() => { setProbe(null); setTargetNote(null); }, [effectiveTarget]);
+
+      const saveTarget = useCallback(async () => {
+        setBusy(true);
+        setTargetNote(null);
+        try {
+          const response = await fetch('api/dsh-sync.settings', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ target: effectiveTarget }),
+          });
+          const result = await response.json();
+          if (response.ok && result.ok) {
+            // Keep the scope draft in step, or saving it later would restore the
+            // target this call just replaced.
+            setDraft(current => current === null ? current : { ...current, target: effectiveTarget });
+            setTargetNote({ kind: 'ok', text: t('target.saved') });
+          } else {
+            setTargetNote({ kind: 'error', text: result.error ?? 'HTTP ' + response.status });
+          }
+        } catch (cause) {
+          setTargetNote({ kind: 'error', text: String(cause?.message ?? cause) });
+        } finally {
+          setBusy(false);
+        }
+      }, [effectiveTarget, t]);
 
       const save = useCallback(async () => {
         setBusy(true);
@@ -469,7 +532,7 @@ window.__ModuleLoader__.load({
           const response = await fetch('api/dsh-sync.run', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ action, target: remote + subpath, resyncMode }),
+            body: JSON.stringify({ action, target: effectiveTarget, resyncMode }),
           });
           const result = await response.json();
           setOutput(result.output ?? result.error ?? '');
@@ -480,9 +543,10 @@ window.__ModuleLoader__.load({
           setBusy(false);
           void load();
         }
-      }, [remote, subpath, resyncMode, load]);
+      }, [effectiveTarget, resyncMode, load]);
 
-      const ready = state !== null && state.rclone.installed && state.rclone.remotes.length > 0;
+      const ready = state !== null && state.rclone.installed
+        && (targetKind === 'local' ? localPath.trim() !== '' : state.rclone.remotes.length > 0);
       const conflicts = state?.conflicts ?? [];
       const items = state?.items ?? [];
       const settings = draft ?? state?.settings ?? null;
@@ -512,21 +576,48 @@ window.__ModuleLoader__.load({
 
         h('section', { style: S.card },
           h('h3', { style: S.heading }, t('target.heading')),
-          state !== null && state.rclone.remotes.length === 0
-            ? h('p', { style: { ...S.hint, ...S.warnText } }, t('target.none'))
-            : h('div', { style: S.controls },
+          h('div', { style: S.controls },
+            h('label', { style: S.field },
+              h('span', { style: S.rowLabel }, t('target.kind')),
+              h('select', {
+                style: S.input, value: targetKind, disabled: busy,
+                onChange: event => setTargetKind(event.target.value),
+              }, [
+                h('option', { key: 'remote', value: 'remote' }, t('target.kind.remote')),
+                h('option', { key: 'local', value: 'local' }, t('target.kind.local')),
+              ]))),
+          targetKind === 'local'
+            ? h('div', { style: S.controls },
               h('label', { style: S.field },
-                h('span', { style: S.rowLabel }, t('target.remote')),
-                h('select', {
-                  style: S.input, value: remote, disabled: busy,
-                  onChange: event => setRemote(event.target.value),
-                }, (state?.rclone.remotes ?? []).map(name => h('option', { key: name, value: name }, name)))),
-              h('label', { style: S.field },
-                h('span', { style: S.rowLabel }, t('target.subpath')),
+                h('span', { style: S.rowLabel }, t('target.local')),
                 h('input', {
-                  style: S.input, value: subpath, disabled: busy, spellCheck: false,
-                  onChange: event => setSubpath(event.target.value),
-                })))),
+                  style: { ...S.input, minWidth: '320px' }, value: localPath, disabled: busy,
+                  spellCheck: false,
+                  onChange: event => setLocalPath(event.target.value),
+                })))
+            : (state !== null && state.rclone.remotes.length === 0
+              ? h('p', { style: { ...S.hint, ...S.warnText } }, t('target.none'))
+              : h('div', { style: S.controls },
+                h('label', { style: S.field },
+                  h('span', { style: S.rowLabel }, t('target.remote')),
+                  h('select', {
+                    style: S.input, value: remote, disabled: busy,
+                    onChange: event => setRemote(event.target.value),
+                  }, (state?.rclone.remotes ?? []).map(name => h('option', { key: name, value: name }, name)))),
+                h('label', { style: S.field },
+                  h('span', { style: S.rowLabel }, t('target.subpath')),
+                  h('input', {
+                    style: S.input, value: subpath, disabled: busy, spellCheck: false,
+                    onChange: event => setSubpath(event.target.value),
+                  })))),
+          targetKind === 'local' ? h('p', { style: S.hint }, t('target.local.hint')) : null,
+          h('div', { style: S.controls },
+            h('button', {
+              style: busy ? { ...S.button, ...S.buttonDisabled } : S.button,
+              disabled: busy,
+              onClick: () => { void saveTarget(); },
+            }, t('target.save'))),
+          Note(targetNote, t)),
 
         h('section', { style: S.card },
           h('h3', { style: S.heading }, t('probe.heading')),

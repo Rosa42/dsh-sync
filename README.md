@@ -9,7 +9,7 @@ It wraps [rclone bisync](https://rclone.org/bisync/) so that none of the followi
 | Area | Purpose |
 |---|---|
 | Current state | Whether rclone is installed, the resolved local and working directories, the generated rules file, the last run, and how many conflict copies exist |
-| Sync target | Cloud remote picked from `rclone listremotes`, plus a subpath, composed into `remote:subpath` |
+| Sync target | Either a cloud remote picked from `rclone listremotes` plus a subpath, or an absolute local folder that a provider client already syncs |
 | Connection self-test | Reachability, writability, and modification-time fidelity of the target, before anything is seeded |
 | Sync scope | Per-slice toggles for what travels between machines, extra exclusion rules, comparison mode, conflict handling, deletion ceiling |
 | Configure cloud storage | Creates a WebDAV remote non-interactively, with a Nutstore (坚果云) preset |
@@ -33,8 +33,38 @@ The last step is the one that cannot be inferred from any documentation. `bisync
 When the remote rewrites modification times the verdict says so, recommends `size`, and offers to apply it. Take that recommendation deliberately rather than silently: `size` alone cannot detect an edit that leaves the file the same length.
 
 ```sh
-npm test   # includes both probe suites; they skip when rclone is not on PATH
+npm test   # includes both probe suites
 ```
+
+## Syncing through a cloud provider's own client
+
+A target does not have to be an rclone remote. An **absolute local folder** works too, which lets a cloud provider's own desktop client do the cloud transport:
+
+```text
+~/.dsh  ──rclone bisync──▶  <mirror folder>  ──provider client──▶  cloud
+```
+
+Set **Target type** to *Local folder* and point it at the folder the provider client already syncs. Nothing else changes: the same filter rules, conflict copies, preview, and deletion ceiling apply, and the self-test runs against the folder.
+
+This is the better path for providers rclone cannot reach directly (百度网盘, 夸克网盘). It avoids a reverse-engineered WebDAV bridge entirely — no cookie to extract, no WebDAV write permission to discover, no unmaintained driver.
+
+What it costs:
+
+- **Two sync layers in series.** A failure is either bisync's or the client's, and you have to tell them apart.
+- **The cloud layer's conflicts are the provider's business.** rclone's `.conflictN` naming applies between the home directory and the mirror; above that the provider client decides, and whatever artifact it leaves becomes a new file the outer layer copies into `~/.dsh`.
+- **Modification times may drift.** A client that stamps downloads with the current time makes bisync take one extra, content-identical pass per file. It settles rather than thrashing, because both sides of the bisync pair are local filesystems.
+
+### Why a mirror, and not the home directory itself
+
+Pointing `DSH_HOME` straight at a folder the provider client syncs looks simpler and is worse:
+
+- **`storages/` must not be shared.** `workspace.json` is rewritten wholesale by each machine; two writers overwrite each other and sessions disappear from the sidebar. Consumer sync clients generally cannot exclude a subfolder.
+- **`.credentials.yaml` holds plaintext API keys**, with the same lack of exclusions.
+- **`session.lock` and `*.tmp`** are per-machine artifacts.
+- **Session logs are appended to constantly**, and a client that uploads a file mid-write handles that badly.
+- **No preview, no deletion ceiling, no conflict copies.** rclone's safety rails are what make the exclusions above trustworthy in the first place.
+
+Mirroring through bisync keeps every one of those rules in force, because the filter rules run before anything reaches the provider client.
 
 ## Install
 

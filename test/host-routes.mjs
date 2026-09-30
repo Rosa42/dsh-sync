@@ -66,6 +66,24 @@ try {
   const badTarget = await call('/api/dsh-sync.settings', { target: 'no colon here' })
   check('settings rejects a malformed target', badTarget.status === 400, String(badTarget.status))
 
+  const relativeTarget = await call('/api/dsh-sync.settings', { target: './mirror' })
+  check('settings refuses a relative path', relativeTarget.status === 400, String(relativeTarget.status))
+
+  const localFolder = join(sandbox, 'mirror')
+  const localTarget = await call('/api/dsh-sync.settings', { target: localFolder })
+  check('settings accepts an absolute local folder', localTarget.status === 200,
+    localTarget.value.error ?? String(localTarget.status))
+  check('the local folder round-trips through settings',
+    localTarget.value.settings?.target === localFolder, String(localTarget.value.settings?.target))
+
+  if (state.value.rclone.installed === true) {
+    const localProbe = await call('/api/dsh-sync.probe', { target: sandbox })
+    check('the probe passes against a local folder', localProbe.value.verdict === 'ok',
+      JSON.stringify((localProbe.value.steps ?? []).map(step => `${step.id}:${step.ok}`)))
+  } else {
+    console.log('skip  local-folder probe (rclone is not installed on this machine)')
+  }
+
   const saved = await call('/api/dsh-sync.settings', {
     target: 'nutstore:dsh',
     sync: { credentials: true, pluginModules: true },

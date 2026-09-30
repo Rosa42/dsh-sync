@@ -87,6 +87,55 @@ const WEBDAV_VENDORS = ['other', 'nextcloud', 'owncloud', 'infinitescale', 'fast
 const TARGET_PATTERN = /^[A-Za-z0-9_.@+-]+:[^\s]*$/
 const REMOTE_NAME_PATTERN = /^[A-Za-z0-9_.@+-]+$/
 
+/** A Windows drive-absolute path, a UNC share, or a POSIX absolute path. */
+const WINDOWS_PATH_PATTERN = /^[A-Za-z]:[\\/]/
+const UNC_PATH_PATTERN = /^\\\\/
+const POSIX_PATH_PATTERN = /^\//
+
+/**
+ * Whether a target names a local directory rather than an rclone remote.
+ *
+ * The Windows drive case is decided before the remote pattern, which would
+ * otherwise read `C:\mirror` as remote `C:` with subpath `\mirror`. A local
+ * target lets a cloud provider's own desktop client do the transport: bisync
+ * mirrors the DSH home into a folder that client already syncs.
+ *
+ * @param target - the configured target string.
+ * @returns true when the target is a filesystem path.
+ */
+function isLocalTarget(target) {
+  return WINDOWS_PATH_PATTERN.test(target)
+    || UNC_PATH_PATTERN.test(target)
+    || POSIX_PATH_PATTERN.test(target)
+}
+
+/**
+ * Validate a target, confirming that a named remote is one rclone knows.
+ * @param target - the configured target string.
+ * @returns an operator-facing error, or null when the target is usable.
+ */
+async function validateTarget(target) {
+  if (isLocalTarget(target)) return null
+  if (!TARGET_PATTERN.test(target)) {
+    return 'Choose a remote and a subpath (nutstore:dsh), or an absolute local folder path.'
+  }
+  const remoteName = `${target.slice(0, target.indexOf(':'))}:`
+  const { installed, remotes } = await rcloneState()
+  if (!installed) return 'rclone is not installed.'
+  if (!remotes.includes(remoteName)) return `rclone has no configured remote named ${remoteName}`
+  return null
+}
+
+/**
+ * Address one file inside a target.
+ * @param target - the configured target string.
+ * @param name - the file name to append.
+ * @returns the rclone path to that file.
+ */
+function targetFile(target, name) {
+  return isLocalTarget(target) ? join(target, name) : `${target.replace(/\/+$/, '')}/${name}`
+}
+
 /** Resolved once per activation; see the module doc for why these two differ. */
 let localRoot = ''
 let workDir = ''
@@ -395,8 +444,13 @@ async function handleSettings(request) {
     extraExcludes: posted.extraExcludes ?? current.extraExcludes,
   })
 
-  if (next.target !== '' && !TARGET_PATTERN.test(next.target)) {
-    return json({ ok: false, error: 'The target must look like remote:subpath, for example nutstore:dsh.' }, 400)
+  // Only the form is checked here. Whether a named remote exists is a use-time
+  // question, so a target can be saved before its remote is created.
+  if (next.target !== '' && !isLocalTarget(next.target) && !TARGET_PATTERN.test(next.target)) {
+    return json({
+      ok: false,
+      error: 'The target must be remote:subpath (nutstore:dsh), or an absolute local folder path.',
+    }, 400)
   }
 
   await writeSettings(next)
@@ -511,16 +565,10 @@ async function handleRun(request) {
   if (action !== 'preview' && action !== 'sync' && action !== 'seed') {
     return json({ ok: false, error: `Unsupported action: ${String(action)}` }, 400)
   }
-  if (!TARGET_PATTERN.test(target)) {
-    return json({ ok: false, error: 'Choose a remote and a subpath first, for example nutstore:dsh.' }, 400)
-  }
+  const problem = await validateTarget(target)
+  if (problem !== null) return json({ ok: false, error: problem }, 400)
 
-  const remoteName = `${target.slice(0, target.indexOf(':'))}:`
-  const { remotes } = await rcloneState()
-  if (!remotes.includes(remoteName)) {
-    return json({ ok: false, error: `rclone has no configured remote named ${remoteName}` }, 400)
-  }
-
+  await resolveRclone()
   await syncFilters(settings)
   const result = await run(RCLONE, buildArgs(action, target, settings, resyncMode))
   const output = [result.stdout, result.stderr].filter(part => part !== '').join('\n').trim()
@@ -553,15 +601,18 @@ async function handleRun(request) {
  * the hash types the remote reports.
  */
 async function probeRemote(target) {
+  // A local target never reaches rcloneState, so settle the executable here too.
+  await resolveRclone()
   const steps = []
-  const remoteRoot = `${target.slice(0, target.indexOf(':'))}:`
+  const local = isLocalTarget(target)
+  const reachTarget = local ? target : `${target.slice(0, target.indexOf(':'))}:`
 
-  const reach = await run(RCLONE, ['lsd', remoteRoot], { timeout: PROBE_RUN_TIMEOUT_MS })
+  const reach = await run(RCLONE, ['lsd', reachTarget], { timeout: PROBE_RUN_TIMEOUT_MS })
   steps.push({
     id: 'reach',
     ok: reach.ok,
     detail: reach.ok
-      ? 'The remote answered an authenticated listing.'
+      ? (local ? 'The folder exists and is listable.' : 'The remote answered an authenticated listing.')
       : (reach.stderr.trim() || reach.message),
   })
   if (!reach.ok) return { steps, verdict: 'unreachable', recommendedCompare: null, hashes: [] }
@@ -569,7 +620,7 @@ async function probeRemote(target) {
   const sandbox = await mkdtemp(join(tmpdir(), 'dsh-sync-probe-'))
   const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
   const probeName = `.dsh-sync-probe-${stamp}.txt`
-  const remoteFile = `${target.replace(/\/+$/, '')}/${probeName}`
+  const remoteFile = targetFile(target, probeName)
   const localFile = join(sandbox, probeName)
   const body = `dsh-sync probe ${stamp}\n`
 
@@ -655,16 +706,8 @@ async function handleProbe(request) {
     ? source.target
     : settings.target).trim()
 
-  if (!TARGET_PATTERN.test(target)) {
-    return json({ ok: false, error: 'Choose a remote and a subpath first, for example nutstore:dsh.' }, 400)
-  }
-
-  const remoteName = `${target.slice(0, target.indexOf(':'))}:`
-  const { installed, remotes } = await rcloneState()
-  if (!installed) return json({ ok: false, error: 'rclone is not installed.' }, 400)
-  if (!remotes.includes(remoteName)) {
-    return json({ ok: false, error: `rclone has no configured remote named ${remoteName}` }, 400)
-  }
+  const problem = await validateTarget(target)
+  if (problem !== null) return json({ ok: false, error: problem }, 400)
 
   return json({ ok: true, target, ...await probeRemote(target) })
 }
